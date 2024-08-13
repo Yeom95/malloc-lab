@@ -87,6 +87,8 @@ static void *find_fit(size_t asize);
 static void place(void *bp, size_t asize);
 static void *next_fit(size_t asize);
 static void *next_fit_coalesce(void *bp);
+static void *delay_next_fit_coalesce(void);
+static void *next_after_best_fit(size_t asize);
 
 /* 
  * mm_init - initialize the malloc package.
@@ -126,7 +128,7 @@ static void *extend_heap(size_t words) {
     PUT(FTRP(bp),PACK(size,0)); //Free Block Footer
     PUT(HDRP(NEXT_BLKP(bp)),PACK(0,1)); //New Epilogue Header
 
-    return next_fit_coalesce(bp);
+    return coalesce(bp);
 }
 
 /* 
@@ -150,7 +152,17 @@ void *mm_malloc(size_t size)
         asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
 
     //크기에 맞는 가용리스트 검색
-    if((bp = next_fit(asize)) != NULL) {
+    if((bp = next_after_best_fit(asize)) != NULL) {
+        //블록 분할 후 리턴
+        place(bp,asize);
+        return bp;
+    }
+
+    //NULL값이 나온다면(가용리스트가 없다면) 이때부터 병합실행
+    delay_next_fit_coalesce();
+
+    //병합후에도 안되는지 설정
+    if((bp = find_fit(asize)) != NULL) {
         //블록 분할 후 리턴
         place(bp,asize);
         return bp;
@@ -202,8 +214,10 @@ static void *find_fit(size_t asize) {
     return NULL;
 }
 
- static void *next_fit(size_t asize){
+ static void *next_after_best_fit(size_t asize){
     void *bp;
+    void *best_bp = NULL;
+    size_t bestSize = 0;
 
     for(bp = next_bp ; GET_SIZE(HDRP(bp)) > 0 ; bp = NEXT_BLKP(bp)){
         if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
@@ -216,12 +230,19 @@ static void *find_fit(size_t asize) {
     for(bp = heap_listp;bp < next_bp;bp = NEXT_BLKP(bp)){
         if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
         {
-            next_bp = bp;
-            return bp;
+            if(best_bp == NULL){
+                bestSize = (GET_SIZE(HDRP(bp)) - asize);
+                best_bp = bp;
+            }
+
+            if(bestSize > (GET_SIZE(HDRP(bp))- asize)){
+                bestSize = GET_SIZE(HDRP(bp))- asize;
+                best_bp = bp;
+            }
         }
     }
 
-    return NULL;
+    return best_bp;
  }
 
 /*
@@ -257,7 +278,6 @@ void mm_free(void *ptr)
 
     PUT(HDRP(ptr),PACK(size,0));
     PUT(FTRP(ptr),PACK(size,0));
-    next_fit_coalesce(ptr);
 }
 
 /*
@@ -278,6 +298,9 @@ static void *coalesce(void *bp) {
         size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
         PUT(HDRP(bp),PACK(size,0));
         PUT(FTRP(bp),PACK(size,0));
+        //next_bp 할당
+        if (next_bp >= HDRP(bp) && next_bp <= FTRP(bp))
+            next_bp = bp;
     }
     //case3 앞쪽 가용 뒷쪽 할당
     else if (!prev_alloc && next_alloc)
@@ -285,6 +308,8 @@ static void *coalesce(void *bp) {
         size += GET_SIZE(HDRP(PREV_BLKP(bp)));
         PUT(FTRP(bp),PACK(size,0));
         PUT(HDRP(PREV_BLKP(bp)),PACK(size,0));
+        if (next_bp >= HDRP(bp) && next_bp <= FTRP(bp))
+            next_bp = PREV_BLKP(bp);
         bp = PREV_BLKP(bp);
     }
     //case4 양쪽 다 가용
@@ -292,48 +317,32 @@ static void *coalesce(void *bp) {
         size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
         PUT(HDRP(PREV_BLKP(bp)),PACK(size,0));
         PUT(FTRP(NEXT_BLKP(bp)),PACK(size,0));
+        if (next_bp >= HDRP(bp) && next_bp <= FTRP(bp))
+            next_bp = PREV_BLKP(bp);
         bp = PREV_BLKP(bp);
     }
 
     return bp;
 }
 
-static void *next_fit_coalesce(void *bp) {
-    size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
-    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
-    size_t size = GET_SIZE(HDRP(bp));
+static void *delay_next_fit_coalesce(void){
+    void *bp;
 
-    //case1 양쪽 다 할당
-    if(prev_alloc && next_alloc){
-        return bp;
+    //bp시작부터 에필로그까지 순회
+    for(bp = heap_listp;GET_SIZE(HDRP(NEXT_BLKP(bp))) > 0; bp = NEXT_BLKP(bp)){
+        //가용상태라면
+        if(!GET_ALLOC(HDRP(bp))){
+            //다음블록들이 할당상태가 나오기전까지
+            while (!GET_ALLOC(HDRP(NEXT_BLKP(bp))))
+            {
+                //병합한다
+                size_t size = GET_SIZE(HDRP(bp)) + GET_SIZE(HDRP(NEXT_BLKP(bp)));
+                PUT(HDRP(bp),PACK(size,0));
+                PUT(FTRP(bp),PACK(size,0));
+            }
+            next_bp = bp;
+        }
     }
-    //case2 앞쪽 할당 뒷쪽 가용
-    else if (prev_alloc && !next_alloc)
-    {
-        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
-        PUT(HDRP(bp),PACK(size,0));
-        PUT(FTRP(bp),PACK(size,0));
-        next_bp = bp;
-    }
-    //case3 앞쪽 가용 뒷쪽 할당
-    else if (!prev_alloc && next_alloc)
-    {
-        size += GET_SIZE(HDRP(PREV_BLKP(bp)));
-        PUT(FTRP(bp),PACK(size,0));
-        PUT(HDRP(PREV_BLKP(bp)),PACK(size,0));
-        next_bp = PREV_BLKP(bp);
-        bp = PREV_BLKP(bp);
-    }
-    //case4 양쪽 다 가용
-    else{
-        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
-        PUT(HDRP(PREV_BLKP(bp)),PACK(size,0));
-        PUT(FTRP(NEXT_BLKP(bp)),PACK(size,0));
-        next_bp = PREV_BLKP(bp);
-        bp = PREV_BLKP(bp);
-    }
-
-    return bp;
 }
 
 
@@ -344,7 +353,55 @@ void *mm_realloc(void *ptr, size_t size)
 {
     void *oldptr = ptr;
     void *newptr;
-    size_t copySize;
+    //받은 블록의 현재 크기
+    size_t this_size = GET_SIZE(HDRP(ptr));
+    size_t copySize,asize,bsize,csize;
+
+    //asize=>새로 늘릴 크기
+    asize = DSIZE * ((size+(DSIZE) + (DSIZE - 1)) / DSIZE);
+    //csize=>새로 늘릴 크기+다음 가용 크기
+    csize = GET_SIZE(HDRP(NEXT_BLKP(ptr))) + this_size;
+
+    //사이즈를 줄일경우
+    //없으니까 성능이 확올라감...
+    /*if(this_size - DSIZE >= size){
+        if(size <= DSIZE)
+            asize = 2 * DSIZE;
+        else
+            asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
+        
+        if((this_size - asize) >= (2 * DSIZE)) {
+            PUT(HDRP(ptr) , PACK(asize , 1));
+            PUT(FTRP(ptr) , PACK(asize , 1));
+            PUT(HDRP(NEXT_BLKP(ptr)) , PACK(this_size - asize , 0));
+            PUT(FTRP(NEXT_BLKP(ptr)) , PACK(this_size - asize , 0));
+            coalesce(NEXT_BLKP(ptr));
+        }
+        next_bp = ptr;
+        return ptr;
+    }*/
+
+    //수용할만한 가용크기가 있으면 그냥 메모리 블록을 그대로 병합해 늘린다
+    //csize가 asize보다 크고 다음 메모리 블록이 가용상태라면
+    if(csize >= asize && !GET_ALLOC(HDRP(NEXT_BLKP(ptr)))){
+        //bsize는 병합하고 남는 가용메모리
+        bsize = csize - asize;
+        //만약 가용메모리가 최소메모리블록 크기를 넘는다면
+        if(bsize >= DSIZE){
+            //다시 분할한다
+            PUT(HDRP(ptr) , PACK(asize , 1));
+            PUT(FTRP(ptr) , PACK(asize , 1));
+            PUT(HDRP(NEXT_BLKP(ptr)) , PACK(bsize , 0));
+            PUT(FTRP(NEXT_BLKP(ptr)) , PACK(bsize , 0));
+        }
+        //아니라면 병합하고 할당상태로 만든다
+        else{
+            PUT(HDRP(ptr) , PACK(csize , 1));
+            PUT(FTRP(ptr) , PACK(csize , 1));
+        }
+        next_bp = ptr;
+        return ptr;
+    }
     
     newptr = mm_malloc(size);
     if (newptr == NULL)
@@ -356,6 +413,7 @@ void *mm_realloc(void *ptr, size_t size)
     mm_free(oldptr);
     return newptr;
 }
+
 
 
 
