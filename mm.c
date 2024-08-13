@@ -74,6 +74,7 @@ team_t team = {
 
 // Global variables
 static void *heap_listp = 0;  // 힙의 시작 포인터
+static void *next_bp;
 #define CHUNKSIZE (1<<12) // 힙 확장의 기본 크기 4KB
 
 // extend_heap 전방 선언
@@ -84,6 +85,8 @@ static void *coalesce(void *bp);
 static void *find_fit(size_t asize);
 // place 전방 선언
 static void place(void *bp, size_t asize);
+static void *next_fit(size_t asize);
+static void *next_fit_coalesce(void *bp);
 
 /* 
  * mm_init - initialize the malloc package.
@@ -98,6 +101,8 @@ int mm_init(void)
     PUT(heap_listp + (2 * WSIZE) , PACK(DSIZE,1)); //Prologue footer
     PUT(heap_listp + (3 * WSIZE) , PACK(0,1)); //Epilogue header
     heap_listp += (2 * WSIZE);
+
+    next_bp = heap_listp;
 
     if(extend_heap(CHUNKSIZE/WSIZE) == NULL)
         return -1;
@@ -121,7 +126,7 @@ static void *extend_heap(size_t words) {
     PUT(FTRP(bp),PACK(size,0)); //Free Block Footer
     PUT(HDRP(NEXT_BLKP(bp)),PACK(0,1)); //New Epilogue Header
 
-    return coalesce(bp);
+    return next_fit_coalesce(bp);
 }
 
 /* 
@@ -145,7 +150,7 @@ void *mm_malloc(size_t size)
         asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
 
     //크기에 맞는 가용리스트 검색
-    if((bp = find_fit(asize)) != NULL) {
+    if((bp = next_fit(asize)) != NULL) {
         //블록 분할 후 리턴
         place(bp,asize);
         return bp;
@@ -197,6 +202,28 @@ static void *find_fit(size_t asize) {
     return NULL;
 }
 
+ static void *next_fit(size_t asize){
+    void *bp;
+
+    for(bp = next_bp ; GET_SIZE(HDRP(bp)) > 0 ; bp = NEXT_BLKP(bp)){
+        if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
+        {
+            next_bp = bp;
+            return bp;
+        }
+    }
+
+    for(bp = heap_listp;bp < next_bp;bp = NEXT_BLKP(bp)){
+        if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
+        {
+            next_bp = bp;
+            return bp;
+        }
+    }
+
+    return NULL;
+ }
+
 /*
  * place - 할당된 블록을 프리 리스트에서 제거하고, 남은 공간을 프리 블록으로 변환하는 함수
  */
@@ -230,7 +257,7 @@ void mm_free(void *ptr)
 
     PUT(HDRP(ptr),PACK(size,0));
     PUT(FTRP(ptr),PACK(size,0));
-    coalesce(ptr);
+    next_fit_coalesce(ptr);
 }
 
 /*
@@ -265,6 +292,44 @@ static void *coalesce(void *bp) {
         size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
         PUT(HDRP(PREV_BLKP(bp)),PACK(size,0));
         PUT(FTRP(NEXT_BLKP(bp)),PACK(size,0));
+        bp = PREV_BLKP(bp);
+    }
+
+    return bp;
+}
+
+static void *next_fit_coalesce(void *bp) {
+    size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
+    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
+    size_t size = GET_SIZE(HDRP(bp));
+
+    //case1 양쪽 다 할당
+    if(prev_alloc && next_alloc){
+        return bp;
+    }
+    //case2 앞쪽 할당 뒷쪽 가용
+    else if (prev_alloc && !next_alloc)
+    {
+        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
+        PUT(HDRP(bp),PACK(size,0));
+        PUT(FTRP(bp),PACK(size,0));
+        next_bp = bp;
+    }
+    //case3 앞쪽 가용 뒷쪽 할당
+    else if (!prev_alloc && next_alloc)
+    {
+        size += GET_SIZE(HDRP(PREV_BLKP(bp)));
+        PUT(FTRP(bp),PACK(size,0));
+        PUT(HDRP(PREV_BLKP(bp)),PACK(size,0));
+        next_bp = PREV_BLKP(bp);
+        bp = PREV_BLKP(bp);
+    }
+    //case4 양쪽 다 가용
+    else{
+        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
+        PUT(HDRP(PREV_BLKP(bp)),PACK(size,0));
+        PUT(FTRP(NEXT_BLKP(bp)),PACK(size,0));
+        next_bp = PREV_BLKP(bp);
         bp = PREV_BLKP(bp);
     }
 
