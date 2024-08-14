@@ -321,7 +321,6 @@ static void *coalesce(void *bp) {
             next_bp = PREV_BLKP(bp);
         bp = PREV_BLKP(bp);
     }
-
     return bp;
 }
 
@@ -349,71 +348,57 @@ static void *delay_next_fit_coalesce(void){
 /*
  * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
  */
+
 void *mm_realloc(void *ptr, size_t size)
 {
-    void *oldptr = ptr;
-    void *newptr;
-    //받은 블록의 현재 크기
-    size_t this_size = GET_SIZE(HDRP(ptr));
-    size_t copySize,asize,bsize,csize;
-
-    //asize=>새로 늘릴 크기
-    asize = DSIZE * ((size+(DSIZE) + (DSIZE - 1)) / DSIZE);
-    //csize=>새로 늘릴 크기+다음 가용 크기
-    csize = GET_SIZE(HDRP(NEXT_BLKP(ptr))) + this_size;
-
-    //사이즈를 줄일경우
-    //없으니까 성능이 확올라감...
-    /*if(this_size - DSIZE >= size){
-        if(size <= DSIZE)
-            asize = 2 * DSIZE;
-        else
-            asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
-        
-        if((this_size - asize) >= (2 * DSIZE)) {
-            PUT(HDRP(ptr) , PACK(asize , 1));
-            PUT(FTRP(ptr) , PACK(asize , 1));
-            PUT(HDRP(NEXT_BLKP(ptr)) , PACK(this_size - asize , 0));
-            PUT(FTRP(NEXT_BLKP(ptr)) , PACK(this_size - asize , 0));
-            coalesce(NEXT_BLKP(ptr));
-        }
-        next_bp = ptr;
-        return ptr;
-    }*/
-
-    //수용할만한 가용크기가 있으면 그냥 메모리 블록을 그대로 병합해 늘린다
-    //csize가 asize보다 크고 다음 메모리 블록이 가용상태라면
-    if(csize >= asize && !GET_ALLOC(HDRP(NEXT_BLKP(ptr)))){
-        //bsize는 병합하고 남는 가용메모리
-        bsize = csize - asize;
-        //만약 가용메모리가 최소메모리블록 크기를 넘는다면
-        if(bsize >= DSIZE){
-            //다시 분할한다
-            PUT(HDRP(ptr) , PACK(asize , 1));
-            PUT(FTRP(ptr) , PACK(asize , 1));
-            PUT(HDRP(NEXT_BLKP(ptr)) , PACK(bsize , 0));
-            PUT(FTRP(NEXT_BLKP(ptr)) , PACK(bsize , 0));
-        }
-        //아니라면 병합하고 할당상태로 만든다
-        else{
-            PUT(HDRP(ptr) , PACK(csize , 1));
-            PUT(FTRP(ptr) , PACK(csize , 1));
-        }
-        next_bp = ptr;
+    size_t old_size = GET_SIZE(HDRP(ptr));  // 기존 블록의 크기
+    size_t asize = ALIGN(size + DSIZE);     // 새로 할당할 크기 (헤더, 푸터 포함)
+    
+    // 새로운 크기가 기존 크기보다 작거나 같으면 그대로 사용
+    if (asize <= old_size) {
         return ptr;
     }
-    
-    newptr = mm_malloc(size);
-    if (newptr == NULL)
-      return NULL;
-    copySize = GET_SIZE(HDRP(oldptr));
-    if (size < copySize)
-      copySize = size;
-    memcpy(newptr, oldptr, copySize);
-    mm_free(oldptr);
-    return newptr;
-}
 
+    void *prev_blk = PREV_BLKP(ptr);
+    void *next_blk = NEXT_BLKP(ptr);
+    // 블록 병합 시도: 다음 블록이 가용한 경우
+    if(!GET_ALLOC(HDRP(next_blk)) && (old_size + GET_SIZE(HDRP(next_blk)) >= asize)) {
+        size_t new_size = old_size + GET_SIZE(HDRP(next_blk));
+        PUT(HDRP(ptr), PACK(new_size, 1));
+        PUT(FTRP(ptr), PACK(new_size, 1));
+        return ptr;
+    }
+    else if (!GET_ALLOC(HDRP(prev_blk)) && (old_size + GET_SIZE(HDRP(prev_blk)) >= asize)) {
+        size_t prev_size = GET_SIZE(HDRP(prev_blk));
+        size_t new_size = old_size + prev_size;
+
+        // prev_blk와 ptr이 구분되는지 확인
+        if (prev_blk != ptr && prev_blk + prev_size == ptr) {
+            // 이전 블록을 확장하여 현재 블록과 병합
+            PUT(HDRP(prev_blk), PACK(new_size, 1));
+            PUT(FTRP(prev_blk), PACK(new_size, 1));
+
+            // 메모리 영역이 겹치는 경우를 대비하여 memmove 사용
+            memmove(prev_blk, ptr, old_size);
+
+            // 기존 블록 해제 (이미 병합되었으므로 사실상 필요하지 않음)
+            mm_free(ptr);
+
+            return prev_blk;  // 새로운 위치 반환
+        }
+    }
+
+    // 위의 방법으로도 충분히 확장할 수 없는 경우, 새로운 블록을 할당
+    void *new_ptr = mm_malloc(size);
+    if (new_ptr == NULL) {
+        return NULL;
+    }
+
+    // 기존 데이터를 새로운 블록으로 복사하고, 기존 블록 해제
+    memcpy(new_ptr, ptr, old_size - DSIZE);
+    mm_free(ptr);
+    return new_ptr;
+}
 
 
 
